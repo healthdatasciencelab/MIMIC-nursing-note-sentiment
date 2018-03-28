@@ -104,10 +104,21 @@ analysis_df_w_pol <- analysis_df %>%
 ```{r}
 output.folder <- "~/path to project/results"
 
+gg_color_hue <- function(n) {
+  hues = seq(15, 375, length = n + 1)
+  hcl(h = hues, l = 65, c = 100)[1:n]
+}
+
 # 4 Groups
 # Polarity
 analysis_df_w_pol$Quartile <- factor(ntile(analysis_df_w_pol$mean_polarity, 4))
-levels(analysis_df_w_pol$Quartile)
+quartiles <- levels(analysis_df_w_pol$Quartile)
+quartiles
+
+# Map quartiles to specific colors
+quartile.colors <- gg_color_hue(4)
+names(quartile.colors) <- quartiles
+
 
 surv.obj <- survfit(Surv(time = surv_time, event = surv_event) ~ Quartile, data=analysis_df_w_pol)
 
@@ -118,7 +129,8 @@ pol.ggsurv.plot <- GGally::ggsurv(surv.obj, CI=T, cens.col = 2, lty.ci = 3) +
         axis.ticks.x = element_blank()) + 
   scale_y_continuous(breaks = seq(0.4, 1, by = 0.2), limits = c(0.4, 1)) +
   guides(linetype = FALSE) + 
-  scale_colour_discrete(name="Polarity      \nQuartile", breaks=c("1", "2", "3", "4")) 
+  scale_colour_manual(name="Polarity      \nQuartile", 
+                      values = quartile.colors, breaks=c("1", "2", "3", "4"))
 
 # Log-rank test
 ggsurvplot(
@@ -134,12 +146,15 @@ levels(analysis_df_w_pol$Quartile)
 
 surv.obj <- survfit(Surv(time = surv_time, event = surv_event) ~ Quartile, data=analysis_df_w_pol)
 
+
+
 sub.ggsurv.plot <- GGally::ggsurv(surv.obj, CI=T, cens.col = 2, lty.ci = 3) + 
   xlab("Time (days)") + 
   theme(text=element_text(size=8)) + 
   scale_y_continuous(breaks = seq(0.4, 1, by = 0.2), limits = c(0.4, 1)) +
   guides(linetype = FALSE) +
-  scale_colour_discrete(name="Subjectivity\nQuartile", breaks=c("1", "2", "3", "4")) 
+  scale_colour_manual(name="Subjectivity\nQuartile", 
+                      values = quartile.colors, breaks=c("1", "2", "3", "4"))
 
 # Log-rank test
 ggsurvplot(
