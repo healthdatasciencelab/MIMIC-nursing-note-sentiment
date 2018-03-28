@@ -1,0 +1,450 @@
+---
+title: "30-day mortality"
+author: "University of Waterloo Health Data Science Lab"
+date: "March 2018"
+output: pdf_document
+---
+  
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "~/path to project/")
+```
+
+```{r libraries, include=FALSE}
+library(data.table)
+library(rms)
+library(dplyr)
+library(ggplot2)
+library(gridExtra)
+library(xtable)
+library(caret)
+library(MLmetrics)
+library(PRROC)
+library(pROC)
+library(questionr)
+```
+
+# Data preparation
+
+```{r main}
+set.seed(4375) # "HDSL"
+
+admissions_df <- read.csv("Data/patients_df.csv")
+sapsii_df <- read.csv("Data/sapsii_df.csv")
+notes_df <- fread("Data/notes_df_sntmnt.csv")
+mimicii_patients_df <- read.csv("Data/mimic2_patients_df.csv")
+mimicii_admissions_df <- read.csv("Data/mimic2_admissions_df.csv")
+
+notes_df$text <- NULL
+
+notes_df <- notes_df %>% left_join(admissions_df, by="hadm_id")
+
+# Get the difference between the time of death and the time that the note was taken.
+# We don't want to look at notes close to death (~12hrs)
+
+deathtime.POSIX <- as.POSIXlt(strptime(notes_df$dod, "%Y-%m-%d %H:%M:%S"))
+charttime.POSIX <- as.POSIXlt(strptime(notes_df$charttime, "%Y-%m-%d %H:%M:%S"))
+notes_df$death_chart_diffhrs <- difftime(deathtime.POSIX, 
+                                         charttime.POSIX, 
+                                         units="hours")
+
+setDT(notes_df)
+
+notes_df <- notes_df[is.na(death_chart_diffhrs) | 
+                       death_chart_diffhrs > 12]
+
+notes_df <- notes_df[is.na(iserror)]
+
+analysis_df <- admissions_df
+
+setDT(analysis_df) 
+
+analysis_df[dod != "", 
+            mortality_days := difftime(as.Date(dod), 
+                                       as.Date(admittime), units="days")]
+
+# Remove patients with data entry error: death time recorded before admission.
+analysis_df <- analysis_df[is.na(mortality_days) | mortality_days >= 0]
+
+analysis_df[!is.na(mortality_days) & mortality_days < 30, mortality_30d := 1]
+analysis_df[is.na(mortality_30d), mortality_30d := 0]
+analysis_df$mortality_30d <- factor(analysis_df$mortality_30d)
+
+```
+
+```{r main2}
+
+setDT(analysis_df) 
+analysis_df$first_careunit <- factor(analysis_df$first_careunit)
+
+### For counting number of notes per patient
+
+mytbl <- notes_df
+nrow(mytbl)
+length(unique(mytbl$hadm_id))
+
+count.tbl <- count(mytbl, hadm_id)
+count.tbl
+
+analysis_df_counted <- left_join(analysis_df, count.tbl, by="hadm_id")
+setDT(analysis_df_counted)
+analysis_df_counted[is.na(n), n := 0]
+
+
+mean(analysis_df_counted$n)
+sd(analysis_df_counted$n)
+median(analysis_df_counted$n)
+summary(analysis_df_counted$n)
+
+
+a_df_counted_nonzeronotes <- analysis_df_counted[n > 0]
+nrow(a_df_counted_nonzeronotes)
+mean(a_df_counted_nonzeronotes$n)
+sd(a_df_counted_nonzeronotes$n)
+summary(a_df_counted_nonzeronotes$n)
+
+hist(a_df_counted_nonzeronotes$n)
+
+# Break down by 30-day mortality group
+# Survived
+a_df_counted_nonzeronotes <- analysis_df_counted[n > 0 & mortality_30d == 0]
+nrow(a_df_counted_nonzeronotes)
+mean(a_df_counted_nonzeronotes$n)
+sd(a_df_counted_nonzeronotes$n)
+summary(a_df_counted_nonzeronotes$n)
+
+# Expired
+a_df_counted_nonzeronotes <- analysis_df_counted[n > 0 & mortality_30d == 1]
+nrow(a_df_counted_nonzeronotes)
+mean(a_df_counted_nonzeronotes$n)
+sd(a_df_counted_nonzeronotes$n)
+summary(a_df_counted_nonzeronotes$n)
+
+
+### End block
+
+notes_df <- notes_df %>% 
+  group_by(hadm_id) %>% 
+  summarize(mean_polarity = mean(polarity),
+            mean_subjectivity = mean(subjectivity))
+
+# joining notes by admission id.
+analysis_df <- analysis_df %>% left_join(notes_df, by="hadm_id", copy=TRUE)
+
+# joining SAPS II and SOFA scores by ICU stay ID.
+analysis_df <- analysis_df %>% left_join(sapsii_df, by="icustay_id", copy=TRUE)
+```
+
+Notice there are some data where patients are recorded to be very old (~300 yrs old). This was done by MIMIC to anonymize patients over the age of 89.
+
+However, in MIMIC-II, the ages of patients were recorded after death. Therefore, we will randomly sample ages from the >89 group from MIMIC-II and assign their ages to the >89 group from MIMIC-III. We will do so by gender/sex since as we will see, their age distributions are slightly different.
+
+```{r}
+mimicii_age_dataset <- mimicii_admissions_df %>%
+  group_by(subject_id) %>%
+  arrange(admit_dt) %>%
+  filter(row_number()==1) 
+
+mimicii_age_dataset <- mimicii_age_dataset %>% 
+  left_join(mimicii_patients_df, by="subject_id")
+
+mimicii_age_dataset$first_admit_age <- as.numeric(as.Date(mimicii_age_dataset$admit_dt) - 
+                                        as.Date(mimicii_age_dataset$dob)) / 365.242
+
+setDT(mimicii_age_dataset)
+setDT(analysis_df)
+
+ggplot(mimicii_age_dataset[first_admit_age > 89 & first_admit_age < 120]) + 
+  geom_histogram(aes(first_admit_age, fill=sex), bins=20, alpha=0.6) + 
+  ggtitle("Histogram of age of MIMICII patients by sex")
+
+analysis_df[gender == "M" & first_admit_age > 89]$first_admit_age <-
+  sample(mimicii_age_dataset[sex == "M" & first_admit_age > 89 & first_admit_age < 120]$first_admit_age,
+         size = nrow(analysis_df[gender == "M" & first_admit_age > 89]),
+         replace = TRUE)
+
+analysis_df[gender == "F" & first_admit_age > 89]$first_admit_age <-
+  sample(mimicii_age_dataset[sex == "F" & first_admit_age > 89 & first_admit_age < 120]$first_admit_age,
+         size = nrow(analysis_df[gender == "F" & first_admit_age > 89]),
+         replace = TRUE)
+
+analysis_df_w_pol <- analysis_df %>%
+  filter(!is.na(mean_polarity)) 
+```
+
+Code for producting summary statistics in table 2
+
+```{r}
+
+adf.survived <- analysis_df_w_pol[analysis_df_w_pol$mortality_30d == 0,]
+adf.expired <- analysis_df_w_pol[analysis_df_w_pol$mortality_30d == 1,]
+
+sum(adf.survived$first_careunit == "CCU") / nrow(adf.survived)
+sum(adf.expired$first_careunit == "CCU") / nrow(adf.expired)
+
+sum(adf.survived$first_careunit == "CSRU") / nrow(adf.survived)
+sum(adf.expired$first_careunit == "CSRU") / nrow(adf.expired)
+
+sum(adf.survived$first_careunit == "MICU") / nrow(adf.survived)
+sum(adf.expired$first_careunit == "MICU") / nrow(adf.expired)
+
+sum(adf.survived$first_careunit == "SICU") / nrow(adf.survived)
+sum(adf.expired$first_careunit == "SICU") / nrow(adf.expired)
+
+sum(adf.survived$first_careunit == "TSICU") / nrow(adf.survived)
+sum(adf.expired$first_careunit == "TSICU") / nrow(adf.expired)
+
+mean(adf.survived$sapsii)
+sd(adf.survived$sapsii)
+mean(adf.expired$sapsii)
+sd(adf.expired$sapsii)
+
+mean(adf.survived$first_admit_age)
+sd(adf.survived$first_admit_age)
+mean(adf.expired$first_admit_age)
+sd(adf.expired$first_admit_age)
+
+sum(adf.survived$gender == "F") / nrow(adf.survived)
+sum(adf.expired$gender == "F") / nrow(adf.expired)
+
+mean(adf.survived$mean_polarity)
+mean(adf.expired$mean_polarity)
+
+mean(adf.survived$mean_subjectivity)
+mean(adf.expired$mean_subjectivity)
+
+t.test(adf.expired$mean_polarity, adf.survived$mean_polarity)
+t.test(adf.expired$mean_subjectivity, adf.survived$mean_subjectivity)
+
+spearman.test(analysis_df_w_pol$mean_polarity, analysis_df_w_pol$sapsii)
+spearman.test(analysis_df_w_pol$mean_subjectivity, analysis_df_w_pol$sapsii)
+```
+
+# Fit logistic regression model and plot results
+
+```{r}
+
+analysis_df_w_pol$mean_polarity <- 10 * analysis_df_w_pol$mean_polarity
+analysis_df_w_pol$mean_subjectivity <- 10 * analysis_df_w_pol$mean_subjectivity
+
+gg_color_hue <- function(n) {
+  hues = seq(15, 375, length = n + 1)
+  hcl(h = hues, l = 65, c = 100)[1:n]
+}
+
+model_mortality_30d = glm(mortality_30d ~ mean_polarity + 
+                            + mean_subjectivity + sapsii + 
+                            first_careunit + gender, 
+                          family=binomial(link='logit'), 
+                          data=analysis_df_w_pol)
+
+summary(model_mortality_30d)
+
+model.odds.ratio <- odds.ratio(model_mortality_30d)
+
+model.odds.ratio
+
+lrm_30d <- lrm(model_mortality_30d$formula, data = analysis_df_w_pol)
+
+# Calculate Nagelkerke pseudo-R^2
+lrm_30d$stats["R2"]
+
+output.folder <- "~/path to project/results"
+
+analysis_df_w_pol$mean_polarity <- 0.1 * analysis_df_w_pol$mean_polarity
+analysis_df_w_pol$mean_subjectivity <- 0.1 * analysis_df_w_pol$mean_subjectivity
+
+pol.vs.mort.plot <- ggplot(analysis_df_w_pol, aes(mean_polarity, mortality_30d))
+setDF(analysis_df_w_pol)
+mean_mean_polarity_df <- 
+  data.frame(mortality_30d = c("expired", "survived"), 
+             mean_mean_polarity = 
+               c(mean(analysis_df_w_pol[analysis_df_w_pol$mortality_30d == 1, "mean_polarity"]),
+                 mean(analysis_df_w_pol[analysis_df_w_pol$mortality_30d == 0, "mean_polarity"])))
+
+jitter.plot.mp <- pol.vs.mort.plot + geom_jitter(size = 0.005, alpha=1) +
+  xlab("Mean polarity") + 
+  scale_y_discrete("30-day mortality", labels = c("0" = "survived", "1" = "expired")) +
+  geom_vline(aes(xintercept = mean_mean_polarity, colour = mortality_30d), data=mean_mean_polarity_df) +
+  scale_colour_discrete(name = "30-day mortality") + theme(legend.position = "none", text=element_text(size=8))
+
+sub.vs.mort.plot <- ggplot(analysis_df_w_pol, aes(mean_subjectivity, mortality_30d))
+mean_mean_subjectivity_df <-
+  data.frame(mortality_30d = c("expired", "survived"),
+             mean_mean_subjectivity = 
+               c(mean(analysis_df_w_pol[analysis_df_w_pol$mortality_30d == 1, "mean_subjectivity"]),
+                 mean(analysis_df_w_pol[analysis_df_w_pol$mortality_30d == 0, "mean_subjectivity"])))
+
+jitter.plot.ms <- sub.vs.mort.plot + geom_jitter(size = 0.005, alpha = 1) + 
+  xlab("Mean subjectivity") + 
+  scale_y_discrete("30-day mortality", labels = c("0" = "survived", "1" = "expired")) +
+  geom_vline(aes(xintercept = mean_mean_subjectivity, colour = mortality_30d), data=mean_mean_subjectivity_df) +
+  scale_colour_discrete(name = "30-day mortality") + 
+  theme(text=element_text(size=8), axis.title.y = element_blank(), 
+        axis.text.y = element_blank(), axis.ticks.y = element_blank())
+
+jitter.plot <- grid.arrange(jitter.plot.mp, jitter.plot.ms, ncol = 2)
+
+jitter.plot
+
+ggsave(file.path(output.folder, "jitter_plot.tiff"), 
+       plot = jitter.plot, width=150, height=84, units="mm", dpi=300)
+
+# Mixture histograms
+
+setDT(analysis_df_w_pol)
+levels(analysis_df_w_pol$mortality_30d) <- c("survived", "expired")
+pol.mixture.histogram <- ggplot() +
+  geom_histogram(aes(y = ..density.., x = mean_polarity, fill=mortality_30d), 
+                 alpha = 0.3, bins = 60, data=analysis_df_w_pol[mortality_30d == "expired"]) +
+  geom_histogram(aes(y = ..density.. , x = mean_polarity, fill=mortality_30d), 
+                 alpha = 0.3, bins = 60, data=analysis_df_w_pol[mortality_30d == "survived"]) +
+  ylab("Density") + xlab("Mean sentiment polarity") +
+  geom_vline(aes(xintercept = mean_mean_polarity, colour = mortality_30d), data=mean_mean_polarity_df) + 
+  scale_fill_manual(values = gg_color_hue(2),
+                    name="30-day\nmortality") +
+  scale_colour_manual(values = gg_color_hue(2), name="30-day\nmortality") + 
+  theme(text = element_text(size = 8), legend.position = "none")
+
+sub.mixture.histogram <- ggplot() +
+  geom_histogram(aes(y = ..density.., x = mean_subjectivity, fill=mortality_30d), 
+                 alpha = 0.3, bins = 60, data=analysis_df_w_pol[mortality_30d == "expired"]) +
+  geom_histogram(aes(y = ..density.. , x = mean_subjectivity, fill=mortality_30d), 
+                 alpha = 0.3, bins = 60, data=analysis_df_w_pol[mortality_30d == "survived"]) +
+  ylab("Density") + xlab("Mean sentiment subjectivity") +
+  geom_vline(aes(xintercept = mean_mean_subjectivity, colour = mortality_30d), data=mean_mean_subjectivity_df) + 
+  scale_fill_manual(values = gg_color_hue(2),
+                    name="30-day\nmortality") +
+  scale_colour_manual(values = gg_color_hue(2), name="30-day\nmortality") + 
+  theme(text=element_text(size=8), axis.title.y = element_blank(), 
+        axis.text.y = element_blank(), axis.ticks.y = element_blank())
+
+mixture.histogram <- grid.arrange(pol.mixture.histogram, sub.mixture.histogram, ncol = 2)
+
+mixture.histogram
+
+ggsave(file.path(output.folder,"mixture_histogram.tiff"), plot = mixture.histogram, 
+       width=150, height=84, units="mm", dpi=300)
+
+```
+
+# Cross-validation and ROC
+
+```{r}
+# Reset data to where it was before modifying for plots
+analysis_df_w_pol <- analysis_df %>%
+  filter(!is.na(mean_polarity))
+
+set.seed(4375)
+
+# Change order of factors (required for using prSummary)
+analysis_df_w_pol$mortality_30d <- factor(analysis_df_w_pol$mortality_30d, levels = c("1", "0"))
+levels(analysis_df_w_pol$mortality_30d) <- c("expired", "survived")
+
+train_control <- trainControl(method="repeatedcv", number=10, repeats=50,
+                              summaryFunction = twoClassSummary, classProbs = TRUE, savePredictions = FALSE)
+
+roc.model1 <- train(mortality_30d ~ 
+                     mean_polarity + mean_subjectivity + sapsii + first_careunit + gender, 
+                   data=analysis_df_w_pol, 
+                   method="glm", family=binomial(), trControl=train_control)
+
+roc.model2 <- train(mortality_30d ~ 
+                     sapsii + first_careunit + gender, 
+                   data=analysis_df_w_pol, 
+                   method="glm", family=binomial(), trControl=train_control)
+
+roc.model1$results
+roc.model2$results
+
+
+### Precision recall ###
+
+train_control <- trainControl(method="repeatedcv", number=10, repeats=50,
+                              summaryFunction = prSummary, classProbs = TRUE, savePredictions = FALSE)
+
+roc.model1 <- train(mortality_30d ~ 
+                     mean_polarity + mean_subjectivity + sapsii + first_careunit + gender, 
+                   data=analysis_df_w_pol, 
+                   method="glm", family=binomial(), trControl=train_control)
+
+roc.model2 <- train(mortality_30d ~ 
+                     sapsii + first_careunit + gender, 
+                   data=analysis_df_w_pol, 
+                   method="glm", family=binomial(), trControl=train_control)
+
+roc.model1$results
+roc.model2$results
+```
+
+### Bootstrap CI's
+```{r}
+### Paired method ###
+
+# Reset data to where it was before modifying for plots. 
+# This is technically reduntant if we run the AUC's first, but 
+# doesn't hurt, and will allow users to jump over the previous AUC section.
+analysis_df_w_pol <- analysis_df %>%
+  filter(!is.na(mean_polarity))
+
+analysis_df_w_pol$mortality_30d <- factor(analysis_df_w_pol$mortality_30d, levels = c("1", "0"))
+levels(analysis_df_w_pol$mortality_30d) <- c("expired", "survived")
+
+train_control <- trainControl(method="repeatedcv", number=10, repeats=1,
+                              summaryFunction = twoClassSummary, classProbs = TRUE, savePredictions = TRUE)
+seed <- 4375
+set.seed(seed)
+roc.model1 <- train(mortality_30d ~ 
+                      mean_polarity + mean_subjectivity + sapsii + first_careunit + gender, 
+                    data=analysis_df_w_pol, 
+                    method="glm", family=binomial(), trControl=train_control)
+set.seed(seed)
+roc.model2 <- train(mortality_30d ~ 
+                      sapsii + first_careunit + gender, 
+                    data=analysis_df_w_pol, 
+                    method="glm", family=binomial(), trControl=train_control)
+
+library(precrec)
+n.boot <- 2000 # Use 2000 for paper
+
+reduced.data <- analysis_df_w_pol[c("mean_polarity", 
+                                    "sapsii", "first_careunit", 
+                                    "gender", "mortality_30d")]
+
+auc.df <- roc.model1$pred
+auc.df$expired1 <- roc.model1$pred$expired
+auc.df$expired2 <- roc.model2$pred$expired
+
+auc.df <- auc.df[c("obs", "expired1", "expired2")]
+
+for (j in c(1,2))
+{
+  auc.list <- lapply(1:n.boot, function(i){
+  
+    data.sample <- sample_n(auc.df, nrow(auc.df), replace = TRUE)
+    auc.1 <- evalmod(labels = (data.sample$obs == "expired"), scores = data.sample$expired1)
+    auc.2 <- evalmod(labels = (data.sample$obs == "expired"), scores = data.sample$expired2)
+    
+    auc.1 <- attr(auc.1, "auc")[j,4] # use [1,4] for ROC, and [2,4] for PRC
+    auc.2 <- attr(auc.2, "auc")[j,4]
+    
+    auc.diff <- auc.1 - auc.2
+    
+    return(auc.diff)
+  }) 
+  
+  auc.results <- do.call(rbind, auc.list)
+
+  if(j == 1)
+  {
+    print("AUROC difference bootstrap 95% CI:")
+  }
+  else 
+  {
+    print("AUPRC difference bootstrap 95% CI:")
+  }
+  
+  print(quantile(auc.results, c(0.025, 0.975)))
+}
+```
+
