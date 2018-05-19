@@ -107,19 +107,23 @@ hist(a_df_counted_nonzeronotes$n)
 
 # Break down by 30-day mortality group
 # Survived
-a_df_counted_nonzeronotes <- analysis_df_counted[n > 0 & mortality_30d == 0]
-nrow(a_df_counted_nonzeronotes)
-mean(a_df_counted_nonzeronotes$n)
-sd(a_df_counted_nonzeronotes$n)
-summary(a_df_counted_nonzeronotes$n)
+a_df_counted_nonzeronotes_surv <- analysis_df_counted[n > 0 & mortality_30d == 0]
+nrow(a_df_counted_nonzeronotes_surv)
+mean(a_df_counted_nonzeronotes_surv$n)
+sd(a_df_counted_nonzeronotes_surv$n)
+summary(a_df_counted_nonzeronotes_surv$n)
 
 # Expired
-a_df_counted_nonzeronotes <- analysis_df_counted[n > 0 & mortality_30d == 1]
-nrow(a_df_counted_nonzeronotes)
-mean(a_df_counted_nonzeronotes$n)
-sd(a_df_counted_nonzeronotes$n)
-summary(a_df_counted_nonzeronotes$n)
+a_df_counted_nonzeronotes_exp <- analysis_df_counted[n > 0 & mortality_30d == 1]
+nrow(a_df_counted_nonzeronotes_exp)
+mean(a_df_counted_nonzeronotes_exp$n)
+sd(a_df_counted_nonzeronotes_exp$n)
+summary(a_df_counted_nonzeronotes_exp$n)
 
+# Perform unequal variance, unpaired, two-sided t-test for sapsii 
+# between 30-day mortality groups
+t.test(a_df_counted_nonzeronotes_exp$n, a_df_counted_nonzeronotes_surv$n, 
+       alternative = "two.sided", paired = FALSE, var.equal = FALSE)
 
 ### End block
 
@@ -194,28 +198,61 @@ sum(adf.expired$first_careunit == "SICU") / nrow(adf.expired)
 sum(adf.survived$first_careunit == "TSICU") / nrow(adf.survived)
 sum(adf.expired$first_careunit == "TSICU") / nrow(adf.expired)
 
+# Perform asymptotic chi-square test of independence between the 
+# variables "first_careunit" and "mortality_30d". We use asymptotic test because
+# this problem is too large for Fisher's exact test.
+freq.table <- table(analysis_df_w_pol$mortality_30d, analysis_df_w_pol$first_careunit)
+freq.table
+chisq.test(freq.table)
+
 mean(adf.survived$sapsii)
 sd(adf.survived$sapsii)
 mean(adf.expired$sapsii)
 sd(adf.expired$sapsii)
+
+# Perform unequal variance, unpaired, two-sided t-test for sapsii 
+# between 30-day mortality groups
+t.test(adf.survived$sapsii, adf.expired$sapsii, 
+       alternative = "two.sided", paired = FALSE, var.equal = FALSE)
 
 mean(adf.survived$first_admit_age)
 sd(adf.survived$first_admit_age)
 mean(adf.expired$first_admit_age)
 sd(adf.expired$first_admit_age)
 
+# Perform unequal variance, unpaired, two-sided t-test for first_admit_age 
+# between 30-day mortality groups
+t.test(adf.survived$first_admit_age, adf.expired$first_admit_age, 
+       alternative = "two.sided", paired = FALSE, var.equal = FALSE)
+
 sum(adf.survived$gender == "F") / nrow(adf.survived)
 sum(adf.expired$gender == "F") / nrow(adf.expired)
+
+# Perform asymptotic chi-square test of independence 
+# between the variables "gender" and "mortality_30d". 
+# We use asymptotic test to remain consistent with the previous 
+# test for first_careunit.
+freq.table <- table(analysis_df_w_pol$mortality_30d, analysis_df_w_pol$gender)
+freq.table
+chisq.test(freq.table, correct = FALSE)
 
 mean(adf.survived$mean_polarity)
 mean(adf.expired$mean_polarity)
 
+# Perform unequal variance, unpaired, two-sided t-test for first_admit_age 
+# between 30-day mortality groups
+t.test(adf.expired$mean_polarity, adf.survived$mean_polarity,
+       alternative = "two.sided", paired = FALSE, var.equal = FALSE)
+
 mean(adf.survived$mean_subjectivity)
 mean(adf.expired$mean_subjectivity)
 
-t.test(adf.expired$mean_polarity, adf.survived$mean_polarity)
-t.test(adf.expired$mean_subjectivity, adf.survived$mean_subjectivity)
+# Perform unequal variance, unpaired, two-sided t-test for first_admit_age 
+# between 30-day mortality groups
+t.test(adf.expired$mean_subjectivity, adf.survived$mean_subjectivity,
+       alternative = "two.sided", paired = FALSE, var.equal = FALSE)
 
+# Calculate Spearman rank rho correlation between mean_polarity and sapsii
 spearman.test(analysis_df_w_pol$mean_polarity, analysis_df_w_pol$sapsii)
 spearman.test(analysis_df_w_pol$mean_subjectivity, analysis_df_w_pol$sapsii)
 ```
